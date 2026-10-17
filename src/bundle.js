@@ -1,48 +1,20 @@
 // Formato binário trocado com os PCs ("bundle"): uma sequência de registros
-//   [4 bytes BE: tamanho do nome][nome utf-8][4 bytes BE: tamanho dos dados][dados deflate-raw]
-// O nome é "manifest.json" ou o sha256 (hex) do conteúdo DEScompactado.
-// Cada arquivo viaja e fica guardado compactado uma vez só: o server repassa
-// esses bytes sem descompactar nem compactar de novo.
+//   [4 bytes BE: tamanho do nome][nome utf-8][4 bytes BE: tamanho dos dados][dados]
+//
+// O server não entende o conteúdo: manifesto e blobs chegam SELADOS pelo PC
+// (cifrados com AES-256-GCM quando o PC usa SYNC_KEY). Ele só guarda e devolve
+// os bytes, e usa a lista de ids (`refs`) para saber o que cada versão usa.
+//
+// Corpo do POST /upload:
+//   "meta.json"  JSON { base: <versão em que o PC se baseou | null>, version: base + 1, refs: [id...] }
+//   "manifest"   manifesto selado
+//   "<id>"       blobs novos (id = 64 hex: HMAC-SHA256 ou sha256 do conteúdo, calculado no PC)
 
-const crypto = require("crypto");
-const zlib = require("zlib");
-
-const MANIFEST = "manifest.json";
-const MAX_FILES = 5000;
-const MAX_UNCOMPRESSED = 200 * 1024 * 1024;
-const MAX_MANIFEST = 5 * 1024 * 1024;
-const SHA_RE = /^[0-9a-f]{64}$/;
-
-// Nunca viajam: dependências reinstaláveis, lixo de ferramenta e as skills que
-// o app Claude Desktop gerencia sozinho em cada PC. Mesma regra em remote_client.py.
-const EXCLUDED_DIRS = new Set(["node_modules", ".git", "__pycache__"]);
-const EXCLUDED_PREFIXES = ["skills/synced/"];
+const MAX_REFS = 20000;
+const MAX_MANIFEST = 20 * 1024 * 1024;
+const ID_RE = /^[0-9a-f]{64}$/;
 
 class BadPackage extends Error {}
-
-const sha256 = (buf) => crypto.createHash("sha256").update(buf).digest("hex");
-
-// Barra zip slip: caminho absoluto, "..", drive do Windows ou barra invertida
-function isSafePath(p) {
-  if (!p || p.length > 512) return false;
-  if (p.startsWith("/") || p.includes("\\") || /^[A-Za-z]:/.test(p)) return false;
-  return p.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..");
-}
-
-function isExcluded(p) {
-  return p.split("/").some((seg) => EXCLUDED_DIRS.has(seg)) || EXCLUDED_PREFIXES.some((pre) => p.startsWith(pre));
-}
-
-const deflate = (buf) => zlib.deflateRawSync(buf, { level: 9 });
-
-// Descompacta com teto: zip bomb estoura aqui em vez de encher a memória
-function inflate(buf, maxBytes) {
-  try {
-    return zlib.inflateRawSync(buf, { maxOutputLength: Math.max(1, maxBytes) });
-  } catch {
-    throw new BadPackage("dados compactados inválidos ou grandes demais");
-  }
-}
 
 // [{ name, data }] -> Buffer
 function encode(records) {
@@ -59,7 +31,7 @@ function encode(records) {
 }
 
 // Buffer -> [{ name, data }]
-function decode(buf, maxRecords = MAX_FILES + 1) {
+function decode(buf, maxRecords = MAX_REFS + 2) {
   const records = [];
   let pos = 0;
   const need = (n) => {
@@ -84,81 +56,36 @@ function decode(buf, maxRecords = MAX_FILES + 1) {
   return records;
 }
 
-// Valida { files: { path: { sha256, size, mtime } } } -> Map(path -> meta)
-function parseManifest(obj) {
-  const listed = obj && typeof obj.files === "object" && !Array.isArray(obj.files) ? obj.files : null;
-  if (!listed) throw new BadPackage("manifest.json sem a lista de arquivos");
-  const entries = Object.entries(listed);
-  if (entries.length > MAX_FILES) throw new BadPackage("arquivos demais");
-  const files = new Map();
-  let total = 0;
-  for (const [path, meta] of entries) {
-    if (!isSafePath(path) || path === MANIFEST) throw new BadPackage(`caminho inválido: ${path}`);
-    if (!meta || !SHA_RE.test(meta.sha256)) throw new BadPackage(`hash inválido: ${path}`);
-    const size = Number(meta.size);
-    if (!Number.isSafeInteger(size) || size < 0) throw new BadPackage(`tamanho inválido: ${path}`);
-    total += size;
-    files.set(path, { sha256: meta.sha256, size, mtime: Number(meta.mtime) || 0 });
-  }
-  if (total > MAX_UNCOMPRESSED) throw new BadPackage("arquivos grandes demais depois de descompactados");
-  return files;
-}
-
-// Map(path -> meta) -> objeto JSON do manifesto
-function manifestObject(files, version) {
-  const out = { version, files: {} };
-  for (const [path, m] of [...files].sort(([a], [b]) => a.localeCompare(b))) {
-    out.files[path] = { sha256: m.sha256, size: m.size, mtime: m.mtime };
-  }
-  return out;
-}
-
-// Corpo do POST /upload: manifest.json + o conteúdo que o server ainda não tem.
-// Devolve { files: Map(path -> meta), blobs: Map(sha -> dados compactados) }.
-// Cada blob é descompactado só para conferir o hash, e depois descartado.
+// Corpo do POST /upload -> { base, version, refs: Set, manifest: Buffer, blobs: Map(id -> Buffer) }
 function readUpload(buffer) {
   const records = decode(buffer);
-  if (!records.length || records[0].name !== MANIFEST) throw new BadPackage("bundle sem manifest.json no início");
-
-  let manifest;
-  try {
-    manifest = JSON.parse(inflate(records[0].data, MAX_MANIFEST).toString("utf-8"));
-  } catch (err) {
-    if (err instanceof BadPackage) throw err;
-    throw new BadPackage("manifest.json inválido");
+  if (records.length < 2 || records[0].name !== "meta.json" || records[1].name !== "manifest") {
+    throw new BadPackage("formato antigo ou inválido: atualize o cliente (git pull)");
   }
-  const all = parseManifest(manifest);
-  const sizeOf = new Map([...all.values()].map((m) => [m.sha256, m.size]));
+  let meta;
+  try {
+    meta = JSON.parse(records[0].data.toString("utf-8"));
+  } catch {
+    throw new BadPackage("meta.json inválido");
+  }
+  const base = meta.base === null ? null : Number(meta.base);
+  if (base !== null && !Number.isSafeInteger(base)) throw new BadPackage("base inválida");
+  if (meta.version !== (base ?? 0) + 1) throw new BadPackage("version precisa ser base + 1");
+  if (!Array.isArray(meta.refs) || meta.refs.length > MAX_REFS || !meta.refs.every((r) => ID_RE.test(r))) {
+    throw new BadPackage("refs inválidas");
+  }
+  const refs = new Set(meta.refs);
+  const manifest = records[1].data;
+  if (!manifest.length || manifest.length > MAX_MANIFEST) throw new BadPackage("manifesto vazio ou grande demais");
 
   const blobs = new Map();
-  let extracted = 0;
-  for (const { name, data } of records.slice(1)) {
-    if (!SHA_RE.test(name)) throw new BadPackage(`registro inválido: ${name.slice(0, 80)}`);
+  for (const { name, data } of records.slice(2)) {
+    if (!ID_RE.test(name)) throw new BadPackage(`registro inválido: ${name.slice(0, 80)}`);
     if (blobs.has(name)) throw new BadPackage("registro repetido");
-    if (!sizeOf.has(name)) throw new BadPackage(`conteúdo fora do manifesto: ${name}`);
-    const content = inflate(data, MAX_UNCOMPRESSED - extracted);
-    extracted += content.length;
-    if (content.length !== sizeOf.get(name) || sha256(content) !== name) throw new BadPackage(`hash não confere: ${name}`);
+    if (!refs.has(name)) throw new BadPackage(`blob fora das refs: ${name}`);
     blobs.set(name, data);
   }
-
-  const files = new Map([...all].filter(([path]) => !isExcluded(path)));
-  return { files, blobs };
+  return { base, version: meta.version, refs, manifest, blobs };
 }
 
-module.exports = {
-  MANIFEST,
-  MAX_FILES,
-  MAX_UNCOMPRESSED,
-  BadPackage,
-  sha256,
-  isSafePath,
-  isExcluded,
-  deflate,
-  inflate,
-  encode,
-  decode,
-  parseManifest,
-  manifestObject,
-  readUpload,
-};
+module.exports = { BadPackage, ID_RE, MAX_REFS, encode, decode, readUpload };

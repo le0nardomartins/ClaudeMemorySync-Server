@@ -2,10 +2,9 @@
 
 - [Autenticação](#autenticação)
 - [Formato bundle](#formato-bundle)
-- [Manifesto](#manifesto)
+- [O que o server entende (e o que não)](#o-que-o-server-entende-e-o-que-não)
 - [Rotas](#rotas)
 - [Fluxo típico](#fluxo-típico)
-- [Exclusões](#exclusões)
 
 ## Autenticação
 
@@ -35,78 +34,72 @@ msg = f"{method}\n{path}\n{ts}\n{hashlib.sha256(body).hexdigest()}".encode()
 sig = base64.b64encode(private_key.sign(msg)).decode()
 ```
 
+O relógio do PC só importa para essa janela de ±5 min contra replay. Ele não decide a ordem das mudanças: quem decide é o número da versão.
+
 ## Formato bundle
 
 Corpo binário (`application/octet-stream`) de `POST /upload` e das respostas de `GET /latest` e `POST /blobs`. É uma sequência de registros, sem cabeçalho geral:
 
 ```
 ┌──────────────┬────────────┬──────────────┬──────────────────────────┐
-│ uint32 BE    │ nome UTF-8 │ uint32 BE    │ dados (deflate-raw)      │
+│ uint32 BE    │ nome UTF-8 │ uint32 BE    │ dados                    │
 │ tam. do nome │ 1–512 B    │ tam. dados   │                          │
 └──────────────┴────────────┴──────────────┴──────────────────────────┘  × N
 ```
 
-- O nome é `manifest.json` ou o **sha256 (hex, minúsculo) do conteúdo descompactado**.
-- Os dados são DEFLATE sem cabeçalho zlib (`zlib.deflateRawSync`, ou `zlib.compressobj(9, zlib.DEFLATED, -15)` no Python).
-- Os blobs são guardados no banco exatamente como chegam e devolvidos sem recompactar.
+## O que o server entende (e o que não)
 
-## Manifesto
-
-```json
-{
-  "version": 21,
-  "files": {
-    "CLAUDE.md":                  { "sha256": "9f2c…", "size": 8123,  "mtime": 1760700000.5 },
-    "skills/minha-skill/SKILL.md": { "sha256": "41ab…", "size": 2210,  "mtime": 1760690000.0 }
-  }
-}
-```
-
-| Campo | Regra |
+| Item | Para o server |
 |---|---|
-| Caminho | Posix relativo e no máximo 512 caracteres. Não pode ter `..`, `.`, segmento vazio, `\`, `/` no início nem letra de drive. |
-| `sha256` | 64 caracteres hex, do conteúdo descompactado. |
-| `size` | Bytes descompactados. A soma de todos os arquivos vai até 200 MB. |
-| `mtime` | Segundos Unix (pode ter fração). Decide quem ganha num conflito. |
-| `version` | Preenchido pelo server, ignorado no upload. |
+| Manifesto | Bytes opacos. O cliente sela com `P1`+deflate (sem `SYNC_KEY`) ou `E1`+nonce+AES-256-GCM (com `SYNC_KEY`). |
+| Blob | Bytes opacos, no mesmo formato. |
+| Id do blob | 64 hex minúsculos. É um HMAC-SHA256 do conteúdo (com `SYNC_KEY`) ou o sha256 (sem). O server só confere o formato. |
+| `refs` | Lista de ids que a versão usa. Serve para checar que nada falta e para apagar blobs órfãos. |
+| `base` / `version` | Controle de concorrência: `version` precisa ser `base + 1`, e `base` precisa ser a versão mais nova. |
 
-No máximo 5000 arquivos por manifesto.
+Por isso o server não faz merge, não descompacta e não valida conteúdo. Quem garante a integridade é o cliente: GCM autentica cada blob, e o sha256 do conteúdo vai no manifesto cifrado.
 
 ## Rotas
-
-### `POST /upload`
-
-Corpo: bundle com `manifest.json` como **primeiro** registro, seguido dos conteúdos que o server ainda não tem. Exige `Content-Type: application/octet-stream` e `Content-Length`.
-
-O server, nesta ordem:
-1. descompacta cada conteúdo com teto, confere tamanho e hash e recusa conteúdo fora do manifesto;
-2. descarta do manifesto os caminhos excluídos (veja [Exclusões](#exclusões));
-3. dentro de uma transação com lock, confere se todo hash do manifesto está no upload ou no banco;
-4. mescla com a versão anterior, lendo só os arquivos que mudaram nos dois lados;
-5. se o conteúdo final é igual ao da versão anterior, não cria versão;
-6. senão, grava os blobs novos e a versão nova, apaga versões além das 3 últimas e os blobs órfãos.
-
-| Status | Corpo |
-|---|---|
-| `201` | `{ "versionId": 22, "fileCount": 580, "totalBytes": 16719660, "newBytes": 4924, "unchanged": false }` |
-| `201` | `{ …, "unchanged": true }`: nada mudou, e `versionId` é a versão atual. |
-| `400` | `{ "error": "hash não confere: …" }` e outros erros de validação. |
-| `409` | `{ "error": "faltam N arquivo(s) no envio", "missing": ["sha256", …] }`. Reenvie incluindo esses conteúdos. |
-| `413` | Corpo maior que `MAX_UPLOAD_MB`. |
-| `415` | Content-Type diferente: cliente antigo (formato zip). |
 
 ### `GET /latest?since=N`
 
 | Status | Corpo |
 |---|---|
-| `204` | A versão mais nova é `N` (ou o banco está vazio). |
-| `200` | Bundle com um único registro `manifest.json`. O cabeçalho `X-Version-Id` traz o id da versão. |
+| `204` | A versão mais nova é `N`, ou ainda não há nenhuma. |
+| `200` | Bundle com um único registro `manifest`. |
 
-A comparação é de **igualdade**, e não `<=`: se o banco for recriado e os ids recomeçarem, o PC ainda baixa.
+O cabeçalho `X-Version-Id` vem sempre: o id da versão mais nova, ou vazio se o server não tem nenhuma. A comparação é de **igualdade**, e não `<=`: se o banco for recriado e os ids recomeçarem, o PC ainda busca.
 
 ### `POST /blobs`
 
-Corpo: `{"hashes": ["sha256", …]}` (JSON, até 5000 itens). Resposta: bundle com os conteúdos encontrados. Os hashes que o server não tem simplesmente não aparecem.
+Corpo: `{"ids": ["<64 hex>", …]}` (JSON, até 20000 itens; o cliente manda lotes de 500). Resposta: bundle com os blobs encontrados, cada registro com nome = id. Os ids que o server não tem simplesmente não aparecem.
+
+### `POST /upload`
+
+Corpo: bundle com, nesta ordem:
+
+| Registro | Conteúdo |
+|---|---|
+| `meta.json` | JSON `{ "base": 21, "version": 22, "refs": ["<id>", …] }`. Use `base: null` e `version: 1` num server vazio. |
+| `manifest` | Manifesto selado (até 20 MB). |
+| `<id>` … | Só os blobs que o server ainda não tem. Todo id enviado precisa estar em `refs`. |
+
+Exige `Content-Type: application/octet-stream` e `Content-Length`.
+
+O server, numa transação com `LOCK TABLE`:
+1. confere se `base` é a versão mais nova; senão, responde `409 conflict`;
+2. confere se toda ref está no envio ou no banco; senão, responde `409 missing`;
+3. grava os blobs novos e a versão;
+4. apaga versões além das 3 últimas e os blobs que nenhuma usa.
+
+| Status | Corpo |
+|---|---|
+| `201` | `{ "versionId": 22, "refCount": 580, "newBytes": 4924, "prunedBlobs": 1 }` |
+| `400` | `{ "error": "..." }`: bundle mal formado, versão fora de sequência, blob fora das refs. |
+| `409` | `{ "conflict": true, "latest": 23 }`: outro PC enviou antes. Busque a versão nova, refaça o merge e envie com `base: 23`. |
+| `409` | `{ "missing": ["<id>", …] }`: reenvie incluindo esses blobs. |
+| `413` | Corpo maior que `MAX_UPLOAD_MB`. |
+| `415` | Content-Type diferente: cliente antigo. |
 
 ### `GET /versions`
 
@@ -114,8 +107,8 @@ Corpo: `{"hashes": ["sha256", …]}` (JSON, até 5000 itens). Resposta: bundle c
 {
   "blobs": { "count": 573, "storedBytes": 6427648 },
   "versions": [
-    { "id": 21, "clientId": "pc-desktop-a8f3", "createdAt": "2026-10-17T16:02:11.000Z",
-      "fileCount": 581, "totalBytes": 16719660, "manifestBytes": 30912 }
+    { "id": 22, "clientId": "pc-desktop-a8f3", "createdAt": "2026-10-17T16:02:11.000Z",
+      "refs": 580, "manifestBytes": 30912 }
   ]
 }
 ```
@@ -123,21 +116,13 @@ Corpo: `{"hashes": ["sha256", …]}` (JSON, até 5000 itens). Resposta: bundle c
 ## Fluxo típico
 
 ```
-PC                                      SERVER
-GET /latest?since=20         ─────►
-                             ◄─────     200, X-Version-Id: 21, bundle[manifest]
-(compara com os hashes locais)
-POST /blobs {hashes:[a1,b7]} ─────►
-                             ◄─────     bundle[a1, b7]
-(monta SHARING_MEMORY e mescla)
-POST /upload bundle[manifest, c9] ──►
-                             ◄─────     201 {versionId: 22}
+PC                                          SERVER
+GET /latest?since=20            ─────►
+                                ◄─────      200, X-Version-Id: 21, bundle[manifest]
+(abre o manifesto, merge de 3 vias com a base 20 e o estado local)
+POST /blobs {ids:[a1,b7]}       ─────►
+                                ◄─────      bundle[a1, b7]
+POST /upload [meta {base:21, version:22}, manifest, c9] ──►
+                                ◄─────      201 {versionId: 22}
+(aplica o resultado na pasta do Claude; a base passa a ser a 22)
 ```
-
-## Exclusões
-
-O server descarta do manifesto, mesmo se o cliente mandar:
-- qualquer caminho com um segmento `node_modules`, `.git` ou `__pycache__`;
-- qualquer caminho que comece com `skills/synced/`.
-
-A regra fica em `src/bundle.js` (`isExcluded`) e é espelhada em `remote_client.py` (`is_excluded`) no cliente.

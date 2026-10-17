@@ -1,5 +1,7 @@
 # Documentação do Claude Memory Sync (server)
 
+**Português** · [English](en/README.md)
+
 Esta pasta tem dois usos:
 
 1. **Documentação** do server, para quem vai fazer o deploy, operar ou modificar.

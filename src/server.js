@@ -1,18 +1,23 @@
 // Server de memória compartilhada do Claude (Railway).
 //
+// É só um ARMAZÉM de versões: o merge acontece nos PCs, e com SYNC_KEY o conteúdo
+// chega cifrado (o server não lê nem o nome dos arquivos).
+//
 // Rotas (todas exigem assinatura Ed25519, ver auth.js):
-//   POST /upload            corpo = bundle (bundle.js): manifesto da NEW_MEMORY + só o
-//                           conteúdo que o server ainda não tem. Mescla e salva.
-//                           409 { missing: [sha...] } se faltar conteúdo: o PC reenvia.
-//   GET  /latest[?since=N]  bundle só com o manifesto da versão mais nova (204 se ela for a própria N).
-//   POST /blobs             corpo JSON { hashes: [...] } -> bundle com esses conteúdos.
+//   POST /upload            bundle (bundle.js): meta.json { base, version, refs } + manifesto
+//                           selado + blobs novos. Aceita só se `base` for a versão mais nova:
+//                           senão 409 { conflict: true, latest } e o PC refaz o merge.
+//                           409 { missing: [id...] } se faltar blob: o PC reenvia com ele.
+//   GET  /latest[?since=N]  bundle só com o manifesto selado da versão mais nova
+//                           (204 se ela for a própria N). X-Version-Id sempre presente.
+//   POST /blobs             corpo JSON { ids: [...] } -> bundle com esses blobs.
 //   GET  /versions          histórico (só metadados).
 // Qualquer outra coisa, inclusive rota inexistente, recebe 401 sem assinatura:
 // quem não está autorizado não descobre nem quais rotas existem.
 //
 // Ordem das defesas (da mais barata para a mais cara):
 //   bloqueio por IP -> cabeçalhos de auth -> tamanho declarado -> leitura do corpo
-//   -> assinatura Ed25519 -> limite de concorrência -> bundle/merge/banco
+//   -> assinatura Ed25519 -> limite de concorrência -> bundle/banco
 //
 // Variáveis de ambiente:
 //   DATABASE_URL        Postgres da Railway (referência ${{Postgres.DATABASE_URL}})
@@ -29,7 +34,6 @@ const db = require("./db");
 
 const MAX_HEAVY_REQUESTS = 2;
 const BUNDLE_TYPE = "application/octet-stream";
-const SHA_RE = /^[0-9a-f]{64}$/;
 
 async function main() {
   const publicKeys = loadPublicKeys(process.env.CLIENT_PUBLIC_KEYS);
@@ -70,34 +74,34 @@ async function main() {
         return res.status(415).json({ error: "formato antigo: atualize o cliente (git pull) e rode de novo" });
       }
       const upload = bundle.readUpload(req.body);
-      req.body = null; // libera o corpo cru antes do merge
+      req.body = null; // libera o corpo cru antes de ir ao banco
       const saved = await db.saveVersion(pool, req.clientId, upload);
-      res.locals.detail = saved.unchanged
-        ? `nada novo de conteúdo, continua na versão ${saved.versionId}`
-        : `versão ${saved.versionId} salva: ${saved.fileCount} arquivos (${mb(saved.totalBytes)}), ` +
-          `${mb(saved.newBytes)} de conteúdo novo guardado`;
+      res.locals.detail =
+        `versão ${saved.versionId} salva: ${saved.refCount} blobs referenciados, ` +
+        `${mb(saved.newBytes)} novos, ${saved.prunedBlobs} antigos apagados`;
       res.status(201).json(saved);
     } catch (err) {
       next(err);
     }
   });
 
-  // Só o manifesto (compactado, como está no banco). O PC compara com o que já tem
-  // e pede em /blobs apenas o conteúdo que falta.
+  // Só o manifesto selado, como está no banco. O PC compara com o que já tem
+  // e pede em /blobs apenas o que falta.
   app.get("/latest", async (req, res, next) => {
     try {
       const since = Number(req.query.since);
       const latestId = await db.latestId(pool);
-      // Igualdade, não "<=": se o banco for recriado os ids recomeçam e o PC ainda precisa baixar
+      res.set("X-Version-Id", latestId === null ? "" : String(latestId));
+      // Igualdade, não "<=": se o banco for recriado os ids recomeçam e o PC ainda precisa buscar
       if (latestId === null || latestId === since) {
-        res.locals.detail = "PC já está na versão mais nova";
+        res.locals.detail = latestId === null ? "nenhuma versão ainda" : "PC já está na versão mais nova";
         return res.status(204).end();
       }
-      const latest = await db.loadLatestManifest(pool);
+      const latest = await db.loadLatest(pool);
+      res.set("X-Version-Id", String(latest.versionId));
       res.locals.detail = `enviou o manifesto da versão ${latest.versionId}`;
       res.set("Content-Type", BUNDLE_TYPE);
-      res.set("X-Version-Id", String(latest.versionId));
-      res.send(bundle.encode([{ name: bundle.MANIFEST, data: latest.manifest }]));
+      res.send(bundle.encode([{ name: "manifest", data: latest.manifest }]));
     } catch (err) {
       next(err);
     }
@@ -105,19 +109,19 @@ async function main() {
 
   app.post("/blobs", async (req, res, next) => {
     try {
-      let hashes;
+      let ids;
       try {
-        hashes = JSON.parse(req.body.toString("utf-8")).hashes;
+        ids = JSON.parse(req.body.toString("utf-8")).ids;
       } catch {
-        hashes = null;
+        ids = null;
       }
-      if (!Array.isArray(hashes) || hashes.length > bundle.MAX_FILES || !hashes.every((h) => SHA_RE.test(h))) {
-        return res.status(400).json({ error: "esperava { hashes: [sha256...] }" });
+      if (!Array.isArray(ids) || ids.length > bundle.MAX_REFS || !ids.every((h) => bundle.ID_RE.test(h))) {
+        return res.status(400).json({ error: "esperava { ids: [64 hex...] }" });
       }
-      const rows = await db.loadBlobs(pool, [...new Set(hashes)]);
-      res.locals.detail = `${rows.length} de ${hashes.length} conteúdo(s) pedidos`;
+      const rows = await db.loadBlobs(pool, [...new Set(ids)]);
+      res.locals.detail = `${rows.length} de ${ids.length} blob(s) pedidos`;
       res.set("Content-Type", BUNDLE_TYPE);
-      res.send(bundle.encode(rows.map((r) => ({ name: r.sha256, data: r.data }))));
+      res.send(bundle.encode(rows.map((r) => ({ name: r.id, data: r.data }))));
     } catch (err) {
       next(err);
     }
@@ -137,6 +141,7 @@ async function main() {
   app.use((err, req, res, next) => {
     if (res.headersSent) return res.end();
     if (err instanceof bundle.BadPackage) return res.status(400).json({ error: err.message });
+    if (err instanceof db.Conflict) return res.status(409).json({ error: err.message, conflict: true, latest: err.latest });
     if (err instanceof db.MissingBlobs) return res.status(409).json({ error: err.message, missing: err.missing });
     if (err.type === "entity.too.large") return res.status(413).json({ error: "corpo grande demais" });
     if (err.type === "request.aborted") return res.end();

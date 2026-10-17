@@ -75,17 +75,13 @@ Requisitos:
 ## Atualizar
 
 1. Faça push na branch configurada. A Railway reconstrói e faz o deploy, e o server novo só recebe tráfego depois de subir.
-2. Se a mudança alterou o protocolo, atualize o cliente em **todos** os PCs: `git pull` + `restart_sync.bat`. Até lá, os PCs desatualizados recebem `415` ou `manifesto inválido` e não sincronizam, mas nada é corrompido.
+2. Se a mudança alterou o protocolo, atualize o cliente em **todos** os PCs: `git pull` + reiniciar o sync. Até lá, os PCs desatualizados recebem `415` e não sincronizam, mas nada é corrompido.
 
 ## Migrações
 
 `db.migrate()` roda a cada start e é idempotente:
 
-1. Cria `blobs` e `memory_versions` se não existirem.
-2. Se encontra a coluna antiga `package` (um zip inteiro por versão):
-   - converte as versões mantidas para manifesto + blobs, já descartando `node_modules` e `skills/synced`;
-   - apaga a coluna;
-   - roda `VACUUM FULL` para devolver o espaço ao disco.
-3. Apaga versões sem manifesto e blobs que nenhuma versão usa.
+1. Se encontra tabelas de protocolos anteriores (`memory_versions`, `blobs`, de quando o merge era no server), **apaga** essas tabelas. Os dados delas não servem ao protocolo novo, que é cifrado.
+2. Cria `cms_blobs` e `cms_versions` se não existirem.
 
-A conversão do formato antigo é **irreversível**. Para guardar o estado anterior, faça um `pg_dump` antes do deploy (veja [operations.md](operations.md#backup)).
+Nenhum dado se perde nos PCs: cada um guarda a base do último sync (`SHARING_MEMORY/`), e o primeiro a rodar o cliente novo reenvia tudo, já cifrado. Para guardar o estado antigo do banco mesmo assim, faça um `pg_dump` antes do deploy (veja [operations.md](operations.md#backup)).
