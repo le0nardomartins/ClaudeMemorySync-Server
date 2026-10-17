@@ -6,8 +6,8 @@ description: Faz deploy, opera e diagnostica o server do Claude Memory Sync (Nod
 # Claude Memory Sync: server
 
 Repositórios:
-- **Server** (este): https://github.com/le0nardomartins/backend-memory-interconnection-claude
-- **Cliente** (um por PC): https://github.com/le0nardomartins/memory-interconnection-claude (ele tem a skill `claude-memory-sync`)
+- **Server** (este): https://github.com/le0nardomartins/ClaudeMemorySync-Server
+- **Cliente** (um por PC): https://github.com/le0nardomartins/ClaudeMemorySync (ele tem a skill `claude-memory-sync`)
 
 Leia sob demanda, nesta pasta:
 - `deploy.md`: subir na Railway ou em outro provedor, atualizar

@@ -14,14 +14,14 @@ Esta pasta tem dois usos:
 | [operations.md](operations.md) | Quem mantém o server | Banco, backup, tamanho, zerar histórico, revogar PCs, diagnóstico |
 | [SKILL.md](SKILL.md) | O Claude | Regras e roteiro que o Claude segue ao usar a skill |
 
-O cliente (que roda em cada PC) tem a própria pasta `docs/`, no repositório [memory-interconnection-claude](https://github.com/le0nardomartins/memory-interconnection-claude/tree/main/docs).
+O cliente (que roda em cada PC) tem a própria pasta `docs/`, no repositório [ClaudeMemorySync](https://github.com/le0nardomartins/ClaudeMemorySync/tree/main/docs).
 
 ## Instalar como skill
 
 **Windows (PowerShell):**
 
 ```powershell
-git clone --depth 1 https://github.com/le0nardomartins/backend-memory-interconnection-claude.git $env:TEMP\cms-server
+git clone --depth 1 https://github.com/le0nardomartins/ClaudeMemorySync-Server.git $env:TEMP\cms-server
 Copy-Item -Recurse $env:TEMP\cms-server\docs $HOME\.claude\skills\claude-memory-server
 Remove-Item -Recurse -Force $env:TEMP\cms-server
 ```
@@ -29,13 +29,13 @@ Remove-Item -Recurse -Force $env:TEMP\cms-server
 **macOS / Linux:**
 
 ```bash
-git clone --depth 1 https://github.com/le0nardomartins/backend-memory-interconnection-claude.git /tmp/cms-server
+git clone --depth 1 https://github.com/le0nardomartins/ClaudeMemorySync-Server.git /tmp/cms-server
 cp -r /tmp/cms-server/docs ~/.claude/skills/claude-memory-server
 rm -rf /tmp/cms-server
 ```
 
 **Pelo próprio Claude:**
 
-> Instale como skill a pasta `docs` do repositório https://github.com/le0nardomartins/backend-memory-interconnection-claude, com o nome `claude-memory-server`.
+> Instale como skill a pasta `docs` do repositório https://github.com/le0nardomartins/ClaudeMemorySync-Server, com o nome `claude-memory-server`.
 
 Exemplos de pedidos depois de instalada: *"suba o server do memory sync na Railway"*, *"autorize o meu notebook novo no server"*, *"quanto espaço o banco do sync está usando?"*.

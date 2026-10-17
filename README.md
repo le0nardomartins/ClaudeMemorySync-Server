@@ -2,7 +2,7 @@
 
 Server do **Claude Memory Sync**, que mantém skills, agentes, comandos, hooks, `CLAUDE.md`, settings, plugins e MCPs do Claude Code iguais entre vários computadores.
 
-Cada PC roda o [cliente](https://github.com/le0nardomartins/memory-interconnection-claude) e conversa com este server. O server recebe o que cada PC mudou, **mescla** com a versão anterior sem apagar nada e entrega a versão combinada aos outros PCs.
+Cada PC roda o [cliente](https://github.com/le0nardomartins/ClaudeMemorySync) e conversa com este server. O server recebe o que cada PC mudou, **mescla** com a versão anterior sem apagar nada e entrega a versão combinada aos outros PCs.
 
 - **Stack:** Node 22, Express 5 e Postgres, empacotado em Docker e pronto para a [Railway](https://railway.com).
 - **Barato:** só circula o que mudou, cada conteúdo é guardado uma vez só (pelo sha256), ficam só as 3 últimas versões e o serviço dorme entre as rodadas.
@@ -241,7 +241,7 @@ Dockerfile · railway.json · .env.example
 A pasta [`docs/`](docs/) tem a documentação detalhada e também é uma **skill do Claude Code** (`claude-memory-server`). Com ela, o Claude sabe fazer o deploy, autorizar PCs, consultar o banco e diagnosticar o server.
 
 ```powershell
-git clone --depth 1 https://github.com/le0nardomartins/backend-memory-interconnection-claude.git $env:TEMP\cms-server
+git clone --depth 1 https://github.com/le0nardomartins/ClaudeMemorySync-Server.git $env:TEMP\cms-server
 Copy-Item -Recurse $env:TEMP\cms-server\docs $HOME\.claude\skills\claude-memory-server
 ```
 
