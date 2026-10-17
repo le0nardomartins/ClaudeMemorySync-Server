@@ -50,7 +50,20 @@ Consequência: **apagar** um arquivo ou uma linha não se propaga para os outros
    - opcionais: `MAX_UPLOAD_MB` (padrão 50) e `DATABASE_SSL=true` se usar a URL pública do Postgres.
 4. Gere um domínio público em **Settings → Networking** e coloque a URL em `SERVER_URL` no `.env` de cada PC.
 
-As tabelas (`memory_versions` e `memory_files`) são criadas sozinhas na primeira vez que o server sobe.
+A tabela `memory_versions` é criada sozinha na primeira vez que o server sobe. Cada versão guarda o **pacote zip já pronto** (bytea). O merge e a compactação acontecem uma única vez, no upload, e o `GET /latest` só repassa esses bytes, sem gastar CPU. O PC descompacta e restaura os arquivos.
+
+## Logs
+
+```
+memory server na porta 8080 | PCs autorizados: pc-notebook-x7k2, pc-desktop-a8f3
+[pc-notebook-x7k2] 177.x.x.x POST /upload -> 201 | recebido 1.01 MB | enviado 0.1 KB | 60 ms | versão 3 salva: 102 arquivos, 1.35 MB -> 1.01 MB compactado
+[pc-desktop-a8f3] 189.x.x.x GET /latest -> 200 | recebido 0.0 KB | enviado 1.01 MB | 1 ms | enviou versão 3
+[pc-desktop-a8f3] 189.x.x.x GET /latest -> 204 | ... | PC já está na versão mais nova
+[recusado] 45.x.x.x (se apresentou como "pc-casa") GET /latest: cabeçalhos de autenticação inválidos
+[bloqueado] 45.x.x.x após 10 falhas, por 15 min
+```
+
+Tentativas recusadas só geram log na 1ª vez e no bloqueio, para um ataque não lotar os logs.
 
 Não há rota de healthcheck pública, porque toda rota exige assinatura. Deixe o healthcheck da Railway desligado: o `restartPolicyType: ON_FAILURE` já reinicia o server se ele cair.
 

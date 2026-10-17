@@ -36,7 +36,7 @@ class FailureLimiter {
       e = { count: 0, resetAt: now + this.windowMs };
       this.entries.set(ip, e);
     }
-    e.count++;
+    return ++e.count;
   }
 
   stop() {
@@ -82,11 +82,12 @@ function securityHeaders(req, res, next) {
 
 // Filtro barato antes de ler o corpo: cabeçalhos de auth presentes, cliente
 // conhecido, horário dentro da janela, tamanho declarado aceitável.
-function createPrecheck({ publicKeys, limiter, maxUploadBytes, maxSkewMs }) {
+// onFailure(req, motivo) é chamado em toda recusa 401 (conta para o bloqueio por IP).
+function createPrecheck({ publicKeys, limiter, maxUploadBytes, maxSkewMs, onFailure }) {
   return function precheck(req, res, next) {
     const ip = req.ip || "unknown";
     const deny = (status = 401, error = "não autorizado") => {
-      if (status === 401) limiter.fail(ip);
+      if (status === 401) onFailure(req, "cabeçalhos de autenticação inválidos");
       // Fecha a conexão: não deixa o cliente continuar mandando corpo
       res.set("Connection", "close");
       return res.status(status).json({ error });
@@ -115,4 +116,24 @@ function createPrecheck({ publicKeys, limiter, maxUploadBytes, maxSkewMs }) {
   };
 }
 
-module.exports = { FailureLimiter, concurrencyGate, securityHeaders, createPrecheck };
+const mb = (bytes) =>
+  bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+
+// Uma linha por requisição autorizada: PC, IP, rota, status, MB recebidos/enviados, tempo.
+// Detalhes extras da rota (ex.: versão criada) vêm de res.locals.detail.
+function accessLog(req, res, next) {
+  const start = process.hrtime.bigint();
+  const received = Buffer.isBuffer(req.body) ? req.body.length : 0;
+  res.on("finish", () => {
+    const sent = Number(res.get("Content-Length")) || 0;
+    const ms = Number(process.hrtime.bigint() - start) / 1e6;
+    const detail = res.locals.detail ? ` | ${res.locals.detail}` : "";
+    console.log(
+      `[${req.clientId}] ${req.ip} ${req.method} ${req.path} -> ${res.statusCode}` +
+        ` | recebido ${mb(received)} | enviado ${mb(sent)} | ${ms.toFixed(0)} ms${detail}`
+    );
+  });
+  next();
+}
+
+module.exports = { FailureLimiter, concurrencyGate, securityHeaders, createPrecheck, accessLog, mb };

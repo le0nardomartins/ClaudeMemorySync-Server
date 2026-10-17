@@ -68,6 +68,16 @@ test("zip: recusa zip slip, hash errado e arquivo fora do manifesto", () => {
   assert.throws(() => readPackage(Buffer.from("não sou zip")), BadPackage);
 });
 
+test("versões: pacote pronto mescla com o anterior e traz o número da versão", () => {
+  const { nextPackage } = require("../src/versions");
+  const v1 = nextPackage(null, new Map([["a.md", file("x\n", 1)]]), 1);
+  const v2 = nextPackage(v1.pkg, new Map([["b.md", file("y\n", 2)]]), 2);
+  assert.strictEqual(v2.fileCount, 2);
+  const zip = new AdmZip(v2.pkg);
+  assert.strictEqual(JSON.parse(zip.getEntry("manifest.json").getData()).version, 2);
+  assert.strictEqual(readPackage(v2.pkg).get("a.md").content.toString(), "x\n");
+});
+
 test("auth: aceita assinatura válida uma vez, recusa replay, chave errada e horário velho", () => {
   const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
   const pub = Buffer.from(publicKey.export({ format: "jwk" }).x, "base64url").toString("base64");

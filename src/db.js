@@ -1,9 +1,10 @@
 // Histórico de versões no Postgres da Railway.
-// Cada envio vira uma linha em memory_versions e seus arquivos ficam em
-// memory_files como bytea. Só as MAX_VERSIONS mais novas são mantidas.
+// Cada envio vira uma linha em memory_versions com o pacote zip PRONTO (bytea,
+// já compactado). O download só lê e repassa esses bytes. Só as MAX_VERSIONS
+// mais novas são mantidas.
 
 const { Pool } = require("pg");
-const { sha256 } = require("./zip");
+const { buildPackage } = require("./zip");
 
 const MAX_VERSIONS = 5;
 
@@ -37,62 +38,58 @@ function createPool() {
 async function migrate(pool) {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS memory_versions (
-      id          BIGSERIAL PRIMARY KEY,
-      client_id   TEXT        NOT NULL,
-      created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-      file_count  INTEGER     NOT NULL,
-      total_bytes BIGINT      NOT NULL
+      id            BIGSERIAL PRIMARY KEY,
+      client_id     TEXT        NOT NULL,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+      file_count    INTEGER     NOT NULL,
+      total_bytes   BIGINT      NOT NULL
     );
-    CREATE TABLE IF NOT EXISTS memory_files (
-      version_id BIGINT           NOT NULL REFERENCES memory_versions(id) ON DELETE CASCADE,
-      path       TEXT             NOT NULL,
-      content    BYTEA            NOT NULL,
-      sha256     TEXT             NOT NULL,
-      mtime      DOUBLE PRECISION NOT NULL,
-      PRIMARY KEY (version_id, path)
-    );
+    ALTER TABLE memory_versions ADD COLUMN IF NOT EXISTS package       BYTEA;
+    ALTER TABLE memory_versions ADD COLUMN IF NOT EXISTS package_bytes BIGINT;
+    -- O pacote já é compactado: não adianta o Postgres tentar comprimir de novo
+    ALTER TABLE memory_versions ALTER COLUMN package SET STORAGE EXTERNAL;
   `);
+
+  // Formato antigo (um registro por arquivo em memory_files): converte em pacote e remove
+  const { rows } = await pool.query("SELECT to_regclass('memory_files') IS NOT NULL AS exists");
+  if (rows[0].exists) {
+    const old = await pool.query("SELECT id FROM memory_versions WHERE package IS NULL");
+    for (const { id } of old.rows) {
+      const files = await pool.query("SELECT path, content, mtime FROM memory_files WHERE version_id = $1", [id]);
+      const map = new Map(files.rows.map((r) => [r.path, { content: r.content, mtime: Number(r.mtime) }]));
+      const pkg = buildPackage(map, { version: Number(id) });
+      await pool.query("UPDATE memory_versions SET package = $1, package_bytes = $2 WHERE id = $3", [pkg, pkg.length, id]);
+    }
+    await pool.query("DROP TABLE memory_files");
+    console.log(`[migração] ${old.rows.length} versão(ões) convertidas para pacote único`);
+  }
+  await pool.query("DELETE FROM memory_versions WHERE package IS NULL");
 }
 
-async function latestVersionId(client) {
-  const { rows } = await client.query("SELECT id FROM memory_versions ORDER BY id DESC LIMIT 1");
+async function latestId(db) {
+  const { rows } = await db.query("SELECT id FROM memory_versions ORDER BY id DESC LIMIT 1");
   return rows.length ? Number(rows[0].id) : null;
 }
 
-async function loadFiles(client, versionId) {
-  const { rows } = await client.query(
-    "SELECT path, content, mtime FROM memory_files WHERE version_id = $1",
-    [versionId]
-  );
-  return new Map(rows.map((r) => [r.path, { content: r.content, mtime: Number(r.mtime) }]));
-}
-
-// mergeFn(previousFiles, incomingFiles) -> files. Roda dentro da transação, com
-// lock, para dois PCs enviando ao mesmo tempo não perderem mudanças um do outro.
-async function saveVersion(pool, clientId, incoming, mergeFn) {
+// build(prevPackage | null, versionId) -> { pkg, fileCount, totalBytes }.
+// Roda dentro da transação, com lock, para dois PCs enviando ao mesmo tempo
+// não perderem mudanças um do outro.
+async function saveVersion(pool, clientId, build) {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
     await client.query("LOCK TABLE memory_versions IN EXCLUSIVE MODE");
 
-    const prevId = await latestVersionId(client);
-    const files = prevId ? mergeFn(await loadFiles(client, prevId), incoming) : incoming;
-    const totalBytes = [...files.values()].reduce((s, f) => s + f.content.length, 0);
-
-    const { rows } = await client.query(
-      "INSERT INTO memory_versions (client_id, file_count, total_bytes) VALUES ($1, $2, $3) RETURNING id",
-      [clientId, files.size, totalBytes]
-    );
+    const prev = await client.query("SELECT package FROM memory_versions ORDER BY id DESC LIMIT 1");
+    const { rows } = await client.query("SELECT nextval(pg_get_serial_sequence('memory_versions', 'id')) AS id");
     const versionId = Number(rows[0].id);
+    const { pkg, fileCount, totalBytes } = build(prev.rows.length ? prev.rows[0].package : null, versionId);
 
-    for (const [path, f] of files) {
-      await client.query(
-        "INSERT INTO memory_files (version_id, path, content, sha256, mtime) VALUES ($1, $2, $3, $4, $5)",
-        [versionId, path, f.content, sha256(f.content), f.mtime]
-      );
-    }
-
-    // Mantém só as 5 mais novas; os arquivos caem junto pelo ON DELETE CASCADE
+    await client.query(
+      `INSERT INTO memory_versions (id, client_id, file_count, total_bytes, package, package_bytes)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [versionId, clientId, fileCount, totalBytes, pkg, pkg.length]
+    );
     await client.query(
       `DELETE FROM memory_versions
         WHERE id NOT IN (SELECT id FROM memory_versions ORDER BY id DESC LIMIT $1)`,
@@ -100,7 +97,7 @@ async function saveVersion(pool, clientId, incoming, mergeFn) {
     );
 
     await client.query("COMMIT");
-    return { versionId, fileCount: files.size, totalBytes };
+    return { versionId, fileCount, totalBytes, packageBytes: pkg.length };
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
     throw err;
@@ -109,23 +106,16 @@ async function saveVersion(pool, clientId, incoming, mergeFn) {
   }
 }
 
-async function latestId(pool) {
-  return latestVersionId(pool);
-}
-
-async function loadLatest(pool) {
-  const client = await pool.connect();
-  try {
-    const id = await latestVersionId(client);
-    return id ? { versionId: id, files: await loadFiles(client, id) } : null;
-  } finally {
-    client.release();
-  }
+// Só os bytes prontos: nada de descompactar no server
+async function loadLatestPackage(pool) {
+  const { rows } = await pool.query("SELECT id, package FROM memory_versions ORDER BY id DESC LIMIT 1");
+  return rows.length ? { versionId: Number(rows[0].id), pkg: rows[0].package } : null;
 }
 
 async function listVersions(pool) {
   const { rows } = await pool.query(
-    "SELECT id, client_id, created_at, file_count, total_bytes FROM memory_versions ORDER BY id DESC"
+    `SELECT id, client_id, created_at, file_count, total_bytes, package_bytes
+       FROM memory_versions ORDER BY id DESC`
   );
   return rows.map((r) => ({
     id: Number(r.id),
@@ -133,7 +123,8 @@ async function listVersions(pool) {
     createdAt: r.created_at,
     fileCount: r.file_count,
     totalBytes: Number(r.total_bytes),
+    packageBytes: Number(r.package_bytes),
   }));
 }
 
-module.exports = { createPool, migrate, saveVersion, latestId, loadLatest, listVersions, MAX_VERSIONS };
+module.exports = { createPool, migrate, saveVersion, latestId, loadLatestPackage, listVersions, MAX_VERSIONS };

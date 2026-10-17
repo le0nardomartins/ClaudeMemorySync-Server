@@ -20,9 +20,9 @@
 
 const express = require("express");
 const { loadPublicKeys, createAuthMiddleware, MAX_SKEW_MS } = require("./auth");
-const { readPackage, buildPackage, BadPackage } = require("./zip");
-const { mergeSnapshots } = require("./merge");
-const { FailureLimiter, concurrencyGate, securityHeaders, createPrecheck } = require("./security");
+const { readPackage, BadPackage } = require("./zip");
+const { nextPackage } = require("./versions");
+const { FailureLimiter, concurrencyGate, securityHeaders, createPrecheck, accessLog, mb } = require("./security");
 const db = require("./db");
 
 const MAX_HEAVY_REQUESTS = 2;
@@ -41,40 +41,55 @@ async function main() {
   // A Railway fica na frente com 1 proxy: req.ip passa a ser o IP real do cliente
   app.set("trust proxy", 1);
 
+  // Falhas de auth: conta para o bloqueio e loga só a 1ª e o bloqueio (ataque não enche o log)
+  const onFailure = (req, reason) => {
+    const ip = req.ip || "unknown";
+    const count = limiter.fail(ip);
+    const who = req.get("X-Client-Id") ? ` (se apresentou como "${String(req.get("X-Client-Id")).slice(0, 64)}")` : "";
+    if (count === 1) console.warn(`[recusado] ${ip}${who} ${req.method} ${req.path}: ${reason}`);
+    if (count === limiter.maxFailures) console.warn(`[bloqueado] ${ip} após ${count} falhas, por 15 min`);
+  };
+
   app.use(securityHeaders);
-  app.use(createPrecheck({ publicKeys, limiter, maxUploadBytes, maxSkewMs: MAX_SKEW_MS }));
+  app.use(createPrecheck({ publicKeys, limiter, maxUploadBytes, maxSkewMs: MAX_SKEW_MS, onFailure }));
   // Teto de requisições em andamento ANTES de ler corpo: a memória máxima usada
   // fica em ~MAX_HEAVY_REQUESTS x MAX_UPLOAD_MB, aconteça o que acontecer.
   app.use(concurrencyGate(MAX_HEAVY_REQUESTS));
   // A assinatura cobre o hash do corpo, por isso o corpo é lido antes da verificação
   app.use(express.raw({ type: () => true, limit: maxUploadBytes }));
-  app.use(createAuthMiddleware(publicKeys, { onFailure: (req) => limiter.fail(req.ip || "unknown") }));
+  app.use(createAuthMiddleware(publicKeys, { onFailure: (req) => onFailure(req, "assinatura inválida ou reenviada") }));
+  app.use(accessLog);
 
   app.post("/upload", async (req, res, next) => {
     try {
       if (!req.is("application/zip")) return res.status(415).json({ error: "só aceito application/zip" });
-      let incoming = readPackage(req.body);
+      const incoming = readPackage(req.body);
       req.body = null; // libera o zip cru antes do merge
-      const saved = await db.saveVersion(pool, req.clientId, incoming, mergeSnapshots);
-      incoming = null;
-      console.log(`[upload] ${req.clientId} -> versão ${saved.versionId} (${saved.fileCount} arquivos)`);
+      const saved = await db.saveVersion(pool, req.clientId, (prev, id) => nextPackage(prev, incoming, id));
+      res.locals.detail =
+        `versão ${saved.versionId} salva: ${saved.fileCount} arquivos, ` +
+        `${mb(saved.totalBytes)} -> ${mb(saved.packageBytes)} compactado`;
       res.status(201).json(saved);
     } catch (err) {
       next(err);
     }
   });
 
+  // Repassa o pacote pronto do banco: zero descompactação/compactação no server
   app.get("/latest", async (req, res, next) => {
     try {
       const since = Number(req.query.since);
       const latestId = await db.latestId(pool);
       // Igualdade, não "<=": se o banco for recriado os ids recomeçam e o PC ainda precisa baixar
-      if (latestId === null || latestId === since) return res.status(204).end();
-      const latest = await db.loadLatest(pool);
-      const zip = buildPackage(latest.files, { version: latest.versionId });
+      if (latestId === null || latestId === since) {
+        res.locals.detail = "PC já está na versão mais nova";
+        return res.status(204).end();
+      }
+      const latest = await db.loadLatestPackage(pool);
+      res.locals.detail = `enviou versão ${latest.versionId}`;
       res.set("Content-Type", "application/zip");
       res.set("X-Version-Id", String(latest.versionId));
-      res.send(zip);
+      res.send(latest.pkg);
     } catch (err) {
       next(err);
     }
@@ -101,7 +116,9 @@ async function main() {
   });
 
   const port = Number(process.env.PORT) || 3000;
-  const server = app.listen(port, () => console.log(`memory server na porta ${port}`));
+  const server = app.listen(port, () =>
+    console.log(`memory server na porta ${port} | PCs autorizados: ${[...publicKeys.keys()].join(", ")}`)
+  );
 
   // Conexões lentas ou penduradas (slowloris) não seguram memória/sockets
   server.headersTimeout = 15 * 1000;
