@@ -1,0 +1,51 @@
+# Dependências (reinstaladas pelo package-lock.json, que DEVE ser versionado)
+node_modules/
+
+# Segredos: variáveis do server ficam só na Railway
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Saída do keygen, caso alguém redirecione para arquivo
+keys*.txt
+*.keys
+
+# Uploads/dumps locais de teste (podem conter as chaves de API dos templates)
+*.zip
+files/
+dumps/
+
+# Logs e diagnósticos do Node
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+report.*.json
+*.heapsnapshot
+*.cpuprofile
+
+# Testes e cobertura
+coverage/
+.nyc_output/
+.node_test/
+
+# Cache e build
+.npm/
+.cache/
+dist/
+build/
+*.tsbuildinfo
+
+# Editores e sistema
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+Desktop.ini

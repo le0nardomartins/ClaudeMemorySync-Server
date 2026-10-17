@@ -7,15 +7,31 @@ const { sha256 } = require("./zip");
 
 const MAX_VERSIONS = 5;
 
+// Aceita DATABASE_URL ou as variáveis PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE
+// (o driver pg lê essas sozinho quando não há connectionString).
+function connectionConfig() {
+  if (process.env.DATABASE_URL) return { connectionString: process.env.DATABASE_URL };
+  const missing = ["PGHOST", "PGUSER", "PGPASSWORD", "PGDATABASE"].filter((k) => !process.env[k]);
+  if (missing.length) throw new Error(`Defina DATABASE_URL ou ${missing.join(", ")}`);
+  return {};
+}
+
 function createPool() {
-  if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL não definida");
-  return new Pool({
-    connectionString: process.env.DATABASE_URL,
+  const pool = new Pool({
+    ...connectionConfig(),
     // Pela rede interna da Railway (postgres.railway.internal) não precisa de SSL.
     // Pelo proxy público, defina DATABASE_SSL=true.
     ssl: process.env.DATABASE_SSL === "true" ? { rejectUnauthorized: false } : false,
     max: 5,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 10000,
+    // Nenhuma consulta presa segura conexão/memória para sempre
+    statement_timeout: 60000,
+    idle_in_transaction_session_timeout: 60000,
   });
+  // Erro em conexão ociosa (ex.: restart do Postgres) não pode derrubar o processo
+  pool.on("error", (err) => console.error("[pg] conexão ociosa falhou:", err.message));
+  return pool;
 }
 
 async function migrate(pool) {
@@ -93,6 +109,10 @@ async function saveVersion(pool, clientId, incoming, mergeFn) {
   }
 }
 
+async function latestId(pool) {
+  return latestVersionId(pool);
+}
+
 async function loadLatest(pool) {
   const client = await pool.connect();
   try {
@@ -116,4 +136,4 @@ async function listVersions(pool) {
   }));
 }
 
-module.exports = { createPool, migrate, saveVersion, loadLatest, listVersions, MAX_VERSIONS };
+module.exports = { createPool, migrate, saveVersion, latestId, loadLatest, listVersions, MAX_VERSIONS };

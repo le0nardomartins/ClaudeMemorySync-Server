@@ -33,19 +33,31 @@ function signedMessage(method, path, timestamp, body) {
   return Buffer.from(`${method.toUpperCase()}\n${path}\n${timestamp}\n${bodyHash}`);
 }
 
-function createAuthMiddleware(publicKeys) {
+// Teto de assinaturas lembradas. Só entram assinaturas VÁLIDAS (de PCs
+// autorizados), então isso só enche se um PC seu fizer milhares de requisições
+// em 5 minutos; nesse caso recusamos por segurança em vez de crescer.
+const MAX_SEEN = 10000;
+
+function createAuthMiddleware(publicKeys, { onFailure = () => {} } = {}) {
   // Assinaturas já usadas dentro da janela de 5 min: impede reenviar a mesma requisição
   const seen = new Map();
 
   function prune(now) {
-    for (const [sig, at] of seen) if (now - at > MAX_SKEW_MS) seen.delete(sig);
+    // Map mantém ordem de inserção: as mais antigas vêm primeiro
+    for (const [sig, at] of seen) {
+      if (now - at <= MAX_SKEW_MS) break;
+      seen.delete(sig);
+    }
   }
 
   return function auth(req, res, next) {
     const clientId = req.get("X-Client-Id");
     const timestamp = req.get("X-Timestamp");
     const signature = req.get("X-Signature");
-    const deny = () => res.status(401).json({ error: "não autorizado" });
+    const deny = () => {
+      onFailure(req);
+      return res.status(401).json({ error: "não autorizado" });
+    };
 
     if (!clientId || !timestamp || !signature) return deny();
     const key = publicKeys.get(clientId);
@@ -67,6 +79,7 @@ function createAuthMiddleware(publicKeys) {
 
     prune(now);
     if (seen.has(signature)) return deny();
+    if (seen.size >= MAX_SEEN) return res.status(503).json({ error: "ocupado, tente de novo" });
     seen.set(signature, now);
 
     req.clientId = clientId;
@@ -74,4 +87,4 @@ function createAuthMiddleware(publicKeys) {
   };
 }
 
-module.exports = { loadPublicKeys, createAuthMiddleware, signedMessage };
+module.exports = { loadPublicKeys, createAuthMiddleware, signedMessage, MAX_SKEW_MS };

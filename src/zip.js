@@ -39,8 +39,10 @@ function readPackage(buffer) {
   if (total > MAX_UNCOMPRESSED) throw new BadPackage("zip grande demais depois de descompactado");
 
   const byName = new Map(entries.map((e) => [e.entryName, e]));
+  if (byName.size !== entries.length) throw new BadPackage("zip com nomes repetidos");
   const manifestEntry = byName.get(MANIFEST);
   if (!manifestEntry) throw new BadPackage("zip sem manifest.json");
+  if (manifestEntry.header.size > 5 * 1024 * 1024) throw new BadPackage("manifest.json grande demais");
 
   let manifest;
   try {
@@ -52,11 +54,17 @@ function readPackage(buffer) {
   if (!listed) throw new BadPackage("manifest.json sem a lista de arquivos");
 
   const files = new Map();
+  let extracted = 0;
   for (const [path, meta] of Object.entries(listed)) {
     if (!isSafePath(path) || path === MANIFEST) throw new BadPackage(`caminho inválido: ${path}`);
     const entry = byName.get(path);
     if (!entry) throw new BadPackage(`faltou no zip: ${path}`);
     const content = entry.getData();
+    // O tamanho do cabeçalho pode mentir: confere o real
+    extracted += content.length;
+    if (content.length !== entry.header.size || extracted > MAX_UNCOMPRESSED) {
+      throw new BadPackage(`tamanho inválido: ${path}`);
+    }
     if (sha256(content) !== meta.sha256) throw new BadPackage(`hash não confere: ${path}`);
     files.set(path, { content, mtime: Number(meta.mtime) || 0 });
   }
