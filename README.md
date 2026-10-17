@@ -1,4 +1,4 @@
-# Claude Memory Sync — Server
+# Claude Memory Sync - Server
 
 Server do **Claude Memory Sync**, que mantém skills, agentes, comandos, hooks, `CLAUDE.md`, settings, plugins e MCPs do Claude Code iguais entre vários computadores.
 
