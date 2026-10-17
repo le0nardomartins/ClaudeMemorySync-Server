@@ -2,7 +2,7 @@
   "name": "claude-memory-server",
   "version": "1.0.0",
   "private": true,
-  "description": "Recebe a pasta NEW_MEMORY zipada, mescla com a versão anterior e guarda as 5 últimas no Postgres.",
+  "description": "Recebe o manifesto da NEW_MEMORY e só o conteúdo novo, mescla com a versão anterior e guarda as 3 últimas no Postgres (conteúdo deduplicado por sha256).",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",

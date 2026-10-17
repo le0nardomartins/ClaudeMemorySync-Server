@@ -1,15 +1,18 @@
 // Server de memória compartilhada do Claude (Railway).
 //
 // Rotas (todas exigem assinatura Ed25519, ver auth.js):
-//   POST /upload            corpo = zip da NEW_MEMORY. Mescla com a última versão e salva.
-//   GET  /latest[?since=N]  zip da versão mais nova (204 se ela for a própria N).
+//   POST /upload            corpo = bundle (bundle.js): manifesto da NEW_MEMORY + só o
+//                           conteúdo que o server ainda não tem. Mescla e salva.
+//                           409 { missing: [sha...] } se faltar conteúdo: o PC reenvia.
+//   GET  /latest[?since=N]  bundle só com o manifesto da versão mais nova (204 se ela for a própria N).
+//   POST /blobs             corpo JSON { hashes: [...] } -> bundle com esses conteúdos.
 //   GET  /versions          histórico (só metadados).
 // Qualquer outra coisa, inclusive rota inexistente, recebe 401 sem assinatura:
 // quem não está autorizado não descobre nem quais rotas existem.
 //
 // Ordem das defesas (da mais barata para a mais cara):
 //   bloqueio por IP -> cabeçalhos de auth -> tamanho declarado -> leitura do corpo
-//   -> assinatura Ed25519 -> limite de concorrência -> zip/merge/banco
+//   -> assinatura Ed25519 -> limite de concorrência -> bundle/merge/banco
 //
 // Variáveis de ambiente:
 //   DATABASE_URL        Postgres da Railway (referência ${{Postgres.DATABASE_URL}})
@@ -20,12 +23,13 @@
 
 const express = require("express");
 const { loadPublicKeys, createAuthMiddleware, MAX_SKEW_MS } = require("./auth");
-const { readPackage, BadPackage } = require("./zip");
-const { nextPackage } = require("./versions");
+const bundle = require("./bundle");
 const { FailureLimiter, concurrencyGate, securityHeaders, createPrecheck, accessLog, mb } = require("./security");
 const db = require("./db");
 
 const MAX_HEAVY_REQUESTS = 2;
+const BUNDLE_TYPE = "application/octet-stream";
+const SHA_RE = /^[0-9a-f]{64}$/;
 
 async function main() {
   const publicKeys = loadPublicKeys(process.env.CLIENT_PUBLIC_KEYS);
@@ -62,20 +66,24 @@ async function main() {
 
   app.post("/upload", async (req, res, next) => {
     try {
-      if (!req.is("application/zip")) return res.status(415).json({ error: "só aceito application/zip" });
-      const incoming = readPackage(req.body);
-      req.body = null; // libera o zip cru antes do merge
-      const saved = await db.saveVersion(pool, req.clientId, (prev, id) => nextPackage(prev, incoming, id));
-      res.locals.detail =
-        `versão ${saved.versionId} salva: ${saved.fileCount} arquivos, ` +
-        `${mb(saved.totalBytes)} -> ${mb(saved.packageBytes)} compactado`;
+      if (!req.is(BUNDLE_TYPE)) {
+        return res.status(415).json({ error: "formato antigo: atualize o cliente (git pull) e rode de novo" });
+      }
+      const upload = bundle.readUpload(req.body);
+      req.body = null; // libera o corpo cru antes do merge
+      const saved = await db.saveVersion(pool, req.clientId, upload);
+      res.locals.detail = saved.unchanged
+        ? `nada novo de conteúdo, continua na versão ${saved.versionId}`
+        : `versão ${saved.versionId} salva: ${saved.fileCount} arquivos (${mb(saved.totalBytes)}), ` +
+          `${mb(saved.newBytes)} de conteúdo novo guardado`;
       res.status(201).json(saved);
     } catch (err) {
       next(err);
     }
   });
 
-  // Repassa o pacote pronto do banco: zero descompactação/compactação no server
+  // Só o manifesto (compactado, como está no banco). O PC compara com o que já tem
+  // e pede em /blobs apenas o conteúdo que falta.
   app.get("/latest", async (req, res, next) => {
     try {
       const since = Number(req.query.since);
@@ -85,11 +93,31 @@ async function main() {
         res.locals.detail = "PC já está na versão mais nova";
         return res.status(204).end();
       }
-      const latest = await db.loadLatestPackage(pool);
-      res.locals.detail = `enviou versão ${latest.versionId}`;
-      res.set("Content-Type", "application/zip");
+      const latest = await db.loadLatestManifest(pool);
+      res.locals.detail = `enviou o manifesto da versão ${latest.versionId}`;
+      res.set("Content-Type", BUNDLE_TYPE);
       res.set("X-Version-Id", String(latest.versionId));
-      res.send(latest.pkg);
+      res.send(bundle.encode([{ name: bundle.MANIFEST, data: latest.manifest }]));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.post("/blobs", async (req, res, next) => {
+    try {
+      let hashes;
+      try {
+        hashes = JSON.parse(req.body.toString("utf-8")).hashes;
+      } catch {
+        hashes = null;
+      }
+      if (!Array.isArray(hashes) || hashes.length > bundle.MAX_FILES || !hashes.every((h) => SHA_RE.test(h))) {
+        return res.status(400).json({ error: "esperava { hashes: [sha256...] }" });
+      }
+      const rows = await db.loadBlobs(pool, [...new Set(hashes)]);
+      res.locals.detail = `${rows.length} de ${hashes.length} conteúdo(s) pedidos`;
+      res.set("Content-Type", BUNDLE_TYPE);
+      res.send(bundle.encode(rows.map((r) => ({ name: r.sha256, data: r.data }))));
     } catch (err) {
       next(err);
     }
@@ -108,8 +136,9 @@ async function main() {
   // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, next) => {
     if (res.headersSent) return res.end();
-    if (err instanceof BadPackage) return res.status(400).json({ error: err.message });
-    if (err.type === "entity.too.large") return res.status(413).json({ error: "zip grande demais" });
+    if (err instanceof bundle.BadPackage) return res.status(400).json({ error: err.message });
+    if (err instanceof db.MissingBlobs) return res.status(409).json({ error: err.message, missing: err.missing });
+    if (err.type === "entity.too.large") return res.status(413).json({ error: "corpo grande demais" });
     if (err.type === "request.aborted") return res.end();
     console.error("[erro]", err.message);
     res.status(500).json({ error: "erro interno" });

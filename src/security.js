@@ -44,7 +44,7 @@ class FailureLimiter {
   }
 }
 
-// Limita operações pesadas simultâneas (zip/merge/banco). Não enfileira: recusa.
+// Limita operações pesadas simultâneas (merge/banco). Não enfileira: recusa.
 function concurrencyGate(max) {
   let active = 0;
   return function gate(req, res, next) {
@@ -66,7 +66,7 @@ function concurrencyGate(max) {
   };
 }
 
-// Cabeçalhos para uma API que só fala JSON/zip com clientes próprios
+// Cabeçalhos para uma API que só fala JSON/bundle com clientes próprios
 function securityHeaders(req, res, next) {
   res.set({
     "Cache-Control": "no-store",
@@ -103,12 +103,12 @@ function createPrecheck({ publicKeys, limiter, maxUploadBytes, maxSkewMs, onFail
     if (!Number.isFinite(ts) || Math.abs(Date.now() - ts) > maxSkewMs) return deny();
     if (!/^[A-Za-z0-9+/]{86}==$/.test(sig)) return deny();
 
-    const isUpload = req.method === "POST" && req.path === "/upload";
+    const hasBody = req.method === "POST" && (req.path === "/upload" || req.path === "/blobs");
     const length = Number(req.get("Content-Length") || 0);
-    if (isUpload) {
+    if (hasBody) {
       // Exige tamanho declarado: sem upload "chunked" infinito
       if (!req.get("Content-Length") || !Number.isFinite(length) || length <= 0) return deny(411, "Content-Length obrigatório");
-      if (length > maxUploadBytes) return deny(413, "zip grande demais");
+      if (length > maxUploadBytes) return deny(413, "corpo grande demais");
     } else if (length > 0 || req.get("Transfer-Encoding")) {
       return deny(413, "esta rota não aceita corpo");
     }

@@ -1,27 +1,13 @@
-// Leitura e escrita do pacote zip trocado com os PCs.
+// Formato ANTIGO (um zip inteiro por versão). Só a migração do db.js ainda lê
+// isso, para converter as versões guardadas em manifesto + blobs.
 //
 // O zip sempre traz um manifest.json na raiz:
 //   { "files": { "<caminho/posix>": { "sha256": "...", "size": 123, "mtime": 1700000000.5 } } }
 // O server só aceita o pacote se todo arquivo do manifesto estiver presente com o
 // hash certo, e nenhum arquivo fora dele.
 
-const crypto = require("crypto");
 const AdmZip = require("adm-zip");
-
-const MANIFEST = "manifest.json";
-const MAX_FILES = 5000;
-const MAX_UNCOMPRESSED = 200 * 1024 * 1024;
-
-class BadPackage extends Error {}
-
-const sha256 = (buf) => crypto.createHash("sha256").update(buf).digest("hex");
-
-// Barra zip slip: caminho absoluto, "..", drive do Windows ou barra invertida
-function isSafePath(p) {
-  if (!p || p.length > 512) return false;
-  if (p.startsWith("/") || p.includes("\\") || /^[A-Za-z]:/.test(p)) return false;
-  return p.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..");
-}
+const { MANIFEST, MAX_FILES, MAX_UNCOMPRESSED, BadPackage, sha256, isSafePath } = require("./bundle");
 
 // Buffer zip -> Map(path -> { content, mtime })
 function readPackage(buffer) {

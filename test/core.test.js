@@ -68,14 +68,77 @@ test("zip: recusa zip slip, hash errado e arquivo fora do manifesto", () => {
   assert.throws(() => readPackage(Buffer.from("não sou zip")), BadPackage);
 });
 
-test("versões: pacote pronto mescla com o anterior e traz o número da versão", () => {
-  const { nextPackage } = require("../src/versions");
-  const v1 = nextPackage(null, new Map([["a.md", file("x\n", 1)]]), 1);
-  const v2 = nextPackage(v1.pkg, new Map([["b.md", file("y\n", 2)]]), 2);
-  assert.strictEqual(v2.fileCount, 2);
-  const zip = new AdmZip(v2.pkg);
-  assert.strictEqual(JSON.parse(zip.getEntry("manifest.json").getData()).version, 2);
-  assert.strictEqual(readPackage(v2.pkg).get("a.md").content.toString(), "x\n");
+const bundle = require("../src/bundle");
+const { mergeManifests, sameContent } = require("../src/versions");
+
+const meta = (text, mtime) => ({ sha256: bundle.sha256(Buffer.from(text)), size: Buffer.byteLength(text), mtime });
+
+// Monta o corpo de um POST /upload como o remote_client.py faz
+function uploadBody(files, include = Object.keys(files)) {
+  const manifest = { files: {} };
+  for (const [p, [text, mtime]] of Object.entries(files)) manifest.files[p] = meta(text, mtime);
+  const records = [{ name: "manifest.json", data: bundle.deflate(Buffer.from(JSON.stringify(manifest))) }];
+  for (const p of include) records.push({ name: manifest.files[p].sha256, data: bundle.deflate(Buffer.from(files[p][0])) });
+  return bundle.encode(records);
+}
+
+test("bundle: ida e volta, e recusa dados truncados", () => {
+  const recs = [{ name: "a", data: Buffer.from([1, 2, 3]) }, { name: "b".repeat(64), data: Buffer.alloc(0) }];
+  const back = bundle.decode(bundle.encode(recs));
+  assert.deepStrictEqual(back.map((r) => [r.name, [...r.data]]), [["a", [1, 2, 3]], ["b".repeat(64), []]]);
+  assert.throws(() => bundle.decode(bundle.encode(recs).subarray(0, 10)), bundle.BadPackage);
+  assert.throws(() => bundle.inflate(bundle.deflate(Buffer.alloc(1000)), 10), bundle.BadPackage, "zip bomb");
+});
+
+test("upload: aceita conteúdo parcial, descarta pastas excluídas e confere hash", () => {
+  const files = { "a.md": ["x\n", 1], "b.md": ["y\n", 1], "skills/s/node_modules/m.js": ["m", 1], "skills/synced/k/SKILL.md": ["k", 1] };
+  const up = bundle.readUpload(uploadBody(files, ["a.md"]));
+  assert.deepStrictEqual([...up.files.keys()].sort(), ["a.md", "b.md"]);
+  assert.deepStrictEqual([...up.blobs.keys()], [meta("x\n").sha256]);
+
+  // Conteúdo com hash diferente do nome do registro
+  const forged = bundle.encode([
+    { name: "manifest.json", data: bundle.deflate(Buffer.from(JSON.stringify({ files: { "a.md": meta("x", 1) } }))) },
+    { name: meta("x").sha256, data: bundle.deflate(Buffer.from("y")) },
+  ]);
+  assert.throws(() => bundle.readUpload(forged), bundle.BadPackage);
+  // Conteúdo que não está no manifesto
+  const extra = bundle.encode([
+    { name: "manifest.json", data: bundle.deflate(Buffer.from(JSON.stringify({ files: {} }))) },
+    { name: meta("z").sha256, data: bundle.deflate(Buffer.from("z")) },
+  ]);
+  assert.throws(() => bundle.readUpload(extra), bundle.BadPackage);
+  assert.throws(() => bundle.readUpload(uploadBody({ "../x": ["x", 1] })), bundle.BadPackage);
+});
+
+test("versões: merge só lê o conteúdo de quem mudou dos dois lados", async () => {
+  const store = new Map();
+  const put = (t) => (store.set(bundle.sha256(Buffer.from(t)), Buffer.from(t)), meta(t));
+  put("igual\n");
+  put("a\nb\n");
+  put("a\nNOVA\nb\n");
+  const loaded = [];
+  const load = async (sha) => (loaded.push(sha), store.get(sha));
+
+  const prev = new Map([
+    ["igual.md", { ...meta("igual\n"), mtime: 1 }],
+    ["texto.md", { ...meta("a\nb\n"), mtime: 1 }],
+    ["so-antigo.md", { ...meta("o\n"), mtime: 1 }],
+    ["skills/synced/x.md", { ...meta("s"), mtime: 1 }],
+  ]);
+  const incoming = new Map([
+    ["igual.md", { ...meta("igual\n"), mtime: 5 }],
+    ["texto.md", { ...meta("a\nNOVA\nb\n"), mtime: 2 }],
+    ["novo.md", { ...meta("n\n"), mtime: 2 }],
+  ]);
+  const { files, created } = await mergeManifests(prev, incoming, load);
+  assert.deepStrictEqual([...files.keys()].sort(), ["igual.md", "novo.md", "so-antigo.md", "texto.md"]);
+  assert.strictEqual(files.get("igual.md").mtime, 5);
+  assert.strictEqual(files.get("texto.md").sha256, meta("a\nNOVA\nb\n").sha256);
+  assert.strictEqual(loaded.length, 2, "só texto.md precisou de conteúdo");
+  assert.strictEqual(created.size, 0, "merge deu igual ao recebido: nada novo a guardar");
+  assert.ok(sameContent(files, new Map(files)));
+  assert.ok(!sameContent(files, prev));
 });
 
 test("auth: aceita assinatura válida uma vez, recusa replay, chave errada e horário velho", () => {
