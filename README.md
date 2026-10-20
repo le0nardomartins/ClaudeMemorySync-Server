@@ -53,7 +53,7 @@ Cada PC roda o [cliente](https://github.com/le0nardomartins/ClaudeMemorySync). O
 - **Manifesto selado:** a lista de arquivos da versão, cifrada pelo PC. O server guarda e devolve os bytes sem abrir.
 - **Blob:** um conteúdo cifrado, identificado por um id de 64 hex calculado no PC (HMAC-SHA256 com a `SYNC_KEY`). O mesmo conteúdo em vários caminhos ou versões ocupa um blob só.
 - **refs:** a lista de ids que uma versão usa. É a única coisa que o server entende, e serve para checar que nada falta e para apagar blobs que nenhuma versão usa.
-- **Versão:** número sequencial. É o "relógio" do sistema: a ordem das mudanças é a ordem das versões, e não o relógio dos PCs.
+- **Versão:** número sequencial. Impede que um PC envie em cima de uma versão que ele não viu. Quem ganha um conflito é decidido nos PCs, pela data de modificação dos arquivos (que vai cifrada no manifesto).
 
 Detalhes do protocolo em [docs/api.md](docs/api.md).
 
@@ -240,3 +240,7 @@ cp -r /tmp/cms-server/docs ~/.claude/skills/claude-memory-server     # Windows: 
 | [docs/SKILL.md](docs/SKILL.md) | Instruções que o Claude segue quando usa a skill |
 
 Documentação em inglês: [docs/en/](docs/en/), que também funciona como skill.
+
+## Licença
+
+[MIT](LICENSE).

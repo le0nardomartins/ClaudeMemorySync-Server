@@ -2,6 +2,7 @@
   "name": "claude-memory-server",
   "version": "1.0.0",
   "private": true,
+  "license": "MIT",
   "description": "Armazém de versões do Claude Memory Sync: guarda manifestos e blobs selados (cifrados pelo PC), com controle de concorrência por versão. O merge acontece nos PCs.",
   "main": "src/server.js",
   "scripts": {

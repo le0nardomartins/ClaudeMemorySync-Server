@@ -34,7 +34,7 @@ msg = f"{method}\n{path}\n{ts}\n{hashlib.sha256(body).hexdigest()}".encode()
 sig = base64.b64encode(private_key.sign(msg)).decode()
 ```
 
-The machine's clock only matters for this ±5 min anti-replay window. It doesn't decide the order of changes: the version number does.
+To the server, the machine's clock only matters for this ±5 min anti-replay window. Who wins a conflict is decided on the machines, by file modification time.
 
 ## Bundle format
 

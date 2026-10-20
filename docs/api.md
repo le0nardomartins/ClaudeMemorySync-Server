@@ -34,7 +34,7 @@ msg = f"{method}\n{path}\n{ts}\n{hashlib.sha256(body).hexdigest()}".encode()
 sig = base64.b64encode(private_key.sign(msg)).decode()
 ```
 
-O relógio do PC só importa para essa janela de ±5 min contra replay. Ele não decide a ordem das mudanças: quem decide é o número da versão.
+Para o server, o relógio do PC só importa nessa janela de ±5 min contra replay. Quem ganha um conflito é decidido nos PCs, pela data de modificação dos arquivos.
 
 ## Formato bundle
 

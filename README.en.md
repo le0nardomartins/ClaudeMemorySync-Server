@@ -53,7 +53,7 @@ Each machine runs the [client](https://github.com/le0nardomartins/ClaudeMemorySy
 - **Sealed manifest:** the version's file list, encrypted by the machine. The server stores and returns the bytes without opening them.
 - **Blob:** one encrypted piece of content, identified by a 64-hex id computed on the machine (HMAC-SHA256 keyed with the `SYNC_KEY`). The same content at several paths or in several versions takes one blob.
 - **refs:** the list of ids a version uses. It's the only thing the server understands: it checks nothing is missing and deletes blobs no version uses.
-- **Version:** a sequential number. It's the system's "clock": changes are ordered by version, not by machine clocks.
+- **Version:** a sequential number. It stops a machine from uploading on top of a version it hasn't seen. Who wins a conflict is decided on the machines, by file modification time (carried, encrypted, in the manifest).
 
 Protocol details in [docs/en/api.md](docs/en/api.md).
 
@@ -240,3 +240,7 @@ cp -r /tmp/cms-server/docs/en ~/.claude/skills/claude-memory-server     # Window
 | [docs/en/api.md](docs/en/api.md) | Signing, bundle format, routes and examples |
 | [docs/en/operations.md](docs/en/operations.md) | Database, backups, resetting history, revoking machines, diagnostics |
 | [docs/en/SKILL.md](docs/en/SKILL.md) | Instructions Claude follows when using the skill |
+
+## License
+
+[MIT](LICENSE).
